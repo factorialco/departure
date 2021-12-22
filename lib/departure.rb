@@ -15,7 +15,6 @@ require 'departure/errors'
 require 'departure/command'
 
 require 'departure/railtie' if defined?(Rails)
-require 'departure/connection_base'
 
 # We need the OS not to buffer the IO to see pt-osc's output while migrating
 $stdout.sync = true
@@ -60,8 +59,9 @@ module Departure
       # Make all connections in the connection pool to use PerconaAdapter
       # instead of the current adapter.
       def reconnect_with_percona
-        config = ActiveRecord::Base.connection_config.merge(adapter: 'percona')
-        Departure::ConnectionBase.establish_connection(config)
+        connection_config = ActiveRecord::Base
+          .connection_config.merge(adapter: 'percona')
+        ActiveRecord::Base.establish_connection(connection_config)
       end
     end
   end
