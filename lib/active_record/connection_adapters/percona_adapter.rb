@@ -1,6 +1,7 @@
 require 'active_record/connection_adapters/abstract_mysql_adapter'
 require 'active_record/connection_adapters/statement_pool'
 require 'active_record/connection_adapters/mysql2_adapter'
+require 'active_support/core_ext/string/filters'
 require 'departure'
 require 'forwardable'
 
@@ -9,7 +10,10 @@ module ActiveRecord
     # Establishes a connection to the database that's used by all Active
     # Record objects.
     def percona_connection(config)
-      config[:username] = 'root' if config[:username].nil?
+      if config[:username].nil?
+        config = config.dup if config.frozen?
+        config[:username] = 'root'
+      end
       mysql2_connection = mysql2_connection(config)
 
       connection_details = Departure::ConnectionDetails.new(config)
@@ -74,6 +78,12 @@ module ActiveRecord
         @prepared_statements = false
       end
 
+      def write_query?(sql) # :nodoc:
+        !ActiveRecord::ConnectionAdapters::AbstractAdapter.build_read_query_regexp(
+          :desc, :describe, :set, :show, :use
+        ).match?(sql)
+      end
+
       def exec_delete(sql, name, binds)
         execute(to_sql(sql, binds), name)
         @connection.affected_rows
@@ -119,16 +129,34 @@ module ActiveRecord
       # @param column_name [String, Symbol]
       # @param options [Hash] optional
       def add_index(table_name, column_name, options = {})
-        index_name, index_type, index_columns, index_options = add_index_options(table_name, column_name, options)
-        execute "ALTER TABLE #{quote_table_name(table_name)} ADD #{index_type} INDEX #{quote_column_name(index_name)} (#{index_columns})#{index_options}" # rubocop:disable Metrics/LineLength
+        if ActiveRecord::VERSION::STRING >= '6.1'
+          index_definition, = add_index_options(table_name, column_name, options)
+          execute <<-SQL.squish
+            ALTER TABLE #{quote_table_name(index_definition.table)}
+              ADD #{schema_creation.accept(index_definition)}
+          SQL
+        else
+          index_name, index_type, index_columns, index_options = add_index_options(table_name, column_name, options)
+          execute <<-SQL.squish
+            ALTER TABLE #{quote_table_name(table_name)}
+              ADD #{index_type} INDEX
+              #{quote_column_name(index_name)} (#{index_columns})#{index_options}
+          SQL
+        end
       end
 
       # Remove the given index from the table.
       #
       # @param table_name [String, Symbol]
       # @param options [Hash] optional
-      def remove_index(table_name, options = {})
-        index_name = index_name_for_remove(table_name, options)
+      def remove_index(table_name, column_name = nil, **options)
+        if ActiveRecord::VERSION::STRING >= '6.1'
+          return if options[:if_exists] && !index_exists?(table_name, column_name, **options)
+          index_name = index_name_for_remove(table_name, column_name, **options)
+        else
+          index_name = index_name_for_remove(table_name, options)
+        end
+
         execute "ALTER TABLE #{quote_table_name(table_name)} DROP INDEX #{quote_column_name(index_name)}"
       end
 
@@ -147,6 +175,16 @@ module ActiveRecord
       def error_number(_exception); end
 
       def full_version
+        if ActiveRecord::VERSION::MAJOR < 6
+          get_full_version
+        else
+          schema_cache.database_version.full_version_string
+        end
+      end
+
+      # This is a method defined in Rails 6.0, and we have no control over the
+      # naming of this method.
+      def get_full_version # rubocop:disable Naming/AccessorMethodName
         mysql_adapter.raw_connection.server_info[:version]
       end
 
